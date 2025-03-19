@@ -8,8 +8,8 @@
 #include <WiFiManager.h>
 
 const int buzzer = 32;
-const int LED_R = 12;
-const int LED_G = 14;
+const int LED_R = 33;
+const int LED_G = 35;
 const int pinGetar = 15;
 #define RELAY_PIN 21  
 #define TRIG_PIN 26
@@ -21,14 +21,18 @@ const int pinGetar = 15;
 unsigned long pulseDuration = 0; 
 int buzzerLevel = 0;
 
-String API_URL = "";
-String PostUID = ""; 
-String PostLog = ""; 
-String endpointStatusBarang = ""; //endpoint availability status
-String UsageHistory = ""; //endpoint usage history
+//Define database & endpoint
+String API_URL = "";                //link dari api (url)
+String PostUID = "";                //Endpoint Post UID
+String PostLog = "";                //Endpoint post LogStatus
+String endpointStatusBarang = "";   //endpoint availability status
+String UsageHistory = "";           //endpoint usage history
 const int httpsPort = 443;
+
+//status solenoid
 String solenoidStatus = "KUNCI";
 
+// RFID setup
 MFRC522 mfrc522(SS_PIN, RST_PIN);
 String uid = "";
 String status = "";
@@ -36,9 +40,11 @@ bool isFirstTap = true;
 bool refresh = false;
 String tap = "KUNCI";
 
+// Deklarasi Interrupt untuk sensor getar
 volatile bool getaranTerdeteksi = false;
 WiFiClientSecure client;
 
+// Function declarations
 void setupWiFi();
 void ukurjarak();
 void SensorGetar();
@@ -54,58 +60,62 @@ void IRAM_ATTR handleGetar();
 
 void setup() {
     Serial.begin(115200);
-    setupWiFi();
-    SPI.begin();
-    mfrc522.PCD_Init();
-
+    // Initialize pins
     pinMode(RELAY_PIN, OUTPUT);
-    digitalWrite(RELAY_PIN, HIGH);
+    digitalWrite(RELAY_PIN, HIGH); 
     pinMode(TRIG_PIN, OUTPUT);
     pinMode(ECHO_PIN, INPUT);
     pinMode(LED_R, OUTPUT);
     pinMode(LED_G, OUTPUT);
-    pinMode(buzzer, OUTPUT);
     pinMode(pinGetar, INPUT);
     digitalWrite(LED_R, LOW);
     digitalWrite(LED_G, HIGH);
+
+    // Debugging status relay
     Serial.println("System initialized. Solenoid is locked.");
-    
+
+    // Connect to Wi-Fi
+    setupWiFi();
+    SPI.begin();
+    mfrc522.PCD_Init();
     mfrc522.PCD_SetAntennaGain(MFRC522::RxGain_max);
+
     if (!mfrc522.PCD_PerformSelfTest()) {
         Serial.println("RFID self-test failed.");
     } else {
         Serial.println("RFID initialized successfully.");
     }
     configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+    client.setInsecure();
     attachInterrupt(digitalPinToInterrupt(pinGetar), handleGetar, RISING);
 }
 
 void loop() {
     Serial.println("Relay State: " + String(digitalRead(RELAY_PIN)));
+    
+    // Check and handle vibration sensor flag
+    if (getaranTerdeteksi) {
+        SensorGetar();
+        getaranTerdeteksi = false;          // Reset the flag
+    }    
     ReadRFID();
     ukurjarak();
-    SensorGetar();
+    // Reset RFID communication
     mfrc522.PICC_HaltA();
     mfrc522.PCD_StopCrypto1();
-    delay(100);
+    delay(300);
 }
 
 void setupWiFi() {
     WiFiManager wifiManager;
     wifiManager.setDebugOutput(true);
-
-    Serial.println("Menghapus kredensial WiFi sebelumnya...");
-    wifiManager.resetSettings();  // Hapus kredensial WiFi sebelumnya untuk memastikan AP muncul
-
-    Serial.println("Memulai WiFiManager...");
-    
+    Serial.println("Starting WiFiManager...");
     if (!wifiManager.autoConnect("Sijaga", "sijaga123")) {
-        Serial.println("Gagal menyambungkan WiFi, perangkat akan restart...");
+        Serial.println("Failed to connect, restarting...");
         delay(3000);
         ESP.restart();
     }
-
-    Serial.println("Wi-Fi berhasil terhubung!");
+    Serial.println("Wi-Fi connected!");
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
 }
@@ -116,10 +126,8 @@ void ukurjarak() {
     digitalWrite(TRIG_PIN, HIGH);
     delayMicroseconds(10);
     digitalWrite(TRIG_PIN, LOW);
-
     long duration = pulseIn(ECHO_PIN, HIGH);
     int distance_cm = (duration /2 ) / 29.1;
-
     Serial.print("Distance: ");
     Serial.print(distance_cm);
     Serial.println(" cm");
@@ -127,22 +135,24 @@ void ukurjarak() {
         digitalWrite(LED_R, HIGH);
         digitalWrite(LED_G, LOW);
         status = "ADA BARANG";
-    } 
-    else {
+    } else {
         digitalWrite(LED_R, LOW);
         digitalWrite(LED_G, HIGH);
         status = "TIDAK ADA BARANG";
     }
     Serial.println(status);
+    Serial.println(" ");
     delay(1000);
 }
 
 void SensorGetar() {
     pulseDuration = pulseIn(pinGetar, HIGH); 
-    float membershipRendah = constrain(map(pulseDuration,0,900,1,0),0,1);  
-    float membershipSedang = constrain(map(pulseDuration,900, 1250, 0, 1), 0, 1);  
-    float membershipTinggi = constrain(map(pulseDuration, 1250, 3000, 0, 1), 0, 1);  
-
+    // Keanggotaan untuk "Rendah" (0 - 500 mikrodetik)
+    float membershipRendah = constrain(map(pulseDuration,0,900,1,0),0,1);           // Jika durasi pulsa <= 500us, tingkat rendah
+    // Keanggotaan untuk "Sedang" (500 - 1000 mikrodetik)
+    float membershipSedang = constrain(map(pulseDuration,900, 1250, 0, 1), 0, 1);   // Jika durasi pulsa antara 500 - 1000us
+    // Keanggotaan untuk "Tinggi" (1000 - 3000 mikrodetik)
+    float membershipTinggi = constrain(map(pulseDuration, 1250, 3000, 0, 1), 0, 1); // Jika durasi pulsa >= 1000us, tingkat tinggi
     // Debugging untuk melihat hasil keanggotaan
     Serial.print("Pulse Duration: ");
     Serial.print(pulseDuration);
@@ -152,111 +162,129 @@ void SensorGetar() {
     Serial.print(membershipSedang);
     Serial.print(" | Tinggi: ");
     Serial.println(membershipTinggi);
-
+    // Logika untuk mengendalikan buzzer berdasarkan membership fuzzy
     if (membershipTinggi > 0.5) {
-        buzzerLevel = 1; 
+        buzzerLevel = 1;                    // Jika keanggotaan tinggi > 0.5, nyalakan buzzer
     } else if (membershipSedang > 0.5) {
-        buzzerLevel = 1; 
+        buzzerLevel = 1;                    // Jika keanggotaan sedang > 0.5, nyalakan buzzer
     } else {
-        buzzerLevel = 0; 
+        buzzerLevel = 0;                    // Jika keanggotaan rendah, matikan buzzer
     }
+    // Mengontrol buzzer berdasarkan level
+    if (buzzerLevel == 1) {
+        Serial.println("Alat Bergetar (Buzzer Aktif)");
 
-     buzzerLevel = (membershipTinggi > 0.5 || membershipSedang > 0.5) ? 1 : 0;
-     static unsigned long buzzerStartTime = 0;
-     static bool buzzerState = false;
- 
-     if (buzzerLevel == 1) {
-         if (millis() - buzzerStartTime >= 100) { 
-             buzzerStartTime = millis();
-             buzzerState = !buzzerState;  // Toggle buzzer
-             digitalWrite(buzzer, buzzerState);
-         }
-     } else {
-         digitalWrite(buzzer, LOW);
-     }
- }
+        unsigned long startTime = millis();     // Catat waktu awal
+        while (millis() - startTime < 3000) {   // Loop selama 3 detik
+            digitalWrite(buzzer, HIGH);         // Nyalakan buzzer
+            delay(100);                         // Durasi suara aktif
+            digitalWrite(buzzer, LOW);          // Matikan buzzer
+            delay(100);                         // Durasi jeda sebelum aktif lagi
+        }
+    } else {
+        digitalWrite(buzzer, LOW);              // Matikan buzzer jika tidak ada getaran tinggi
+    }
+}
 
 void ReadRFID() {
-    uid = ""; 
-    if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
-        byte cardUID[4];
-        for (byte i = 0; i < 4; i++) {
-            cardUID[i] = mfrc522.uid.uidByte[i];
-        }
-        Serial.print("Card UID: ");
-        for (byte i = 0; i < 4; i++) {
-            Serial.print(cardUID[i], HEX);
-            Serial.print(" ");
-            uid += String(cardUID[i] < 0x10 ? "0" : "");
-            uid += String(cardUID[i], HEX);
-        }
-        Serial.println();
-        uid.toUpperCase();
-        Serial.println("RFID Detected UID: " + uid);
-        if (uid.length() == 0) {
-            Serial.println("UID is empty, cannot proceed.");
-            return;
-        }
-        bool isAuthorized = checkAuthorization(uid);
-        if (isAuthorized) {
-            Serial.println("UID Match: Authorized!");
-            ControlSolenoid(uid);
-            sendUidToDatabase(uid);
-            StatusBarang(status);
-            historypemakaian(uid, status, solenoidStatus); 
-        } else {
-            Serial.println("UID Not Found: Access Denied.");
-            digitalWrite(buzzer, HIGH);
-            delay(1000);
-            digitalWrite(buzzer, LOW);
-            sendUidToDatabase(uid);
-        }
+    uid = ""; // Clear previous UID
+    // Check if a card is present
+    if (mfrc522.PICC_IsNewCardPresent()) {
+        Serial.println("Fungsi ini terpanggil");
+        if (mfrc522.PICC_ReadCardSerial()) {
+            // Read the UID of the RFID card
+            byte cardUID[4];
+            for (byte i = 0; i < 4; i++) {
+                cardUID[i] = mfrc522.uid.uidByte[i];
+            }
+
+            Serial.print("Card UID: ");
+            for (byte i = 0; i < 4; i++) {
+                Serial.print(cardUID[i], HEX);
+                Serial.print(" ");
+                uid += String(cardUID[i] < 0x10 ? "0" : "");
+                uid += String(cardUID[i], HEX);
+            }
+            Serial.println();
+            uid.toUpperCase();
+            Serial.println("RFID Detected UID: " + uid);
+
+            // Ensure UID is not empty
+            if (uid.length() == 0) {
+                Serial.println("UID is empty, cannot proceed.");
+                return;
+            }
+            // Check authorization
+            bool isAuthorized = checkAuthorization(uid);
+            if (isAuthorized) {
+                Serial.println("UID Match: Authorized!");
+                // Control solenoid (change lock status)
+                ControlSolenoid(uid);
+                sendUidToDatabase(uid);
+                StatusBarang(status);
+                historypemakaian(uid, status, solenoidStatus); // Send history after successful tap
+            } else {
+                Serial.println("UID Not Found: Access Denied.");
+                digitalWrite(buzzer, HIGH);
+                delay(1000);
+                digitalWrite(buzzer, LOW);
+                sendUidToDatabase(uid);
+            }
         }
     }            
+}
 
 void ControlSolenoid(String uid) {
-    if (checkAuthorization(uid)) { 
+    if (checkAuthorization(uid)) { // Cek apakah UID memiliki izin
         Serial.println("UID Authorized: " + uid);
+        // Ubah status solenoid berdasarkan tap
         if (isFirstTap) {
             Serial.println("Unlocking solenoid...");
-            digitalWrite(RELAY_PIN, LOW); 
-            tap = "BUKA";
+            digitalWrite(RELAY_PIN, LOW); // Relay aktif (solenoid buka)
+            tap = "Terbuka";
         } else {
             Serial.println("Locking solenoid...");
-            digitalWrite(RELAY_PIN, HIGH); 
-            tap = "TUTUP";
+            digitalWrite(RELAY_PIN, HIGH); // Relay nonaktif (solenoid kunci)
+            tap = "Tertutup";
         }
 
+        // Perbarui status solenoid global
         solenoidStatus = tap;
+        // Debugging
         Serial.println("Solenoid Status: " + solenoidStatus);
-
-        delay(2000); 
+        delay(3000); // Tambahkan delay untuk memastikan stabilitas relay
+        // Perbarui log status solenoid
         String currentTime = getFormattedTime();
         logSolenoidStatus(uid, currentTime, tap);
+        // Periksa status barang menggunakan ultrasonik
         ukurjarak();
+        // Ubah status tap
         isFirstTap = !isFirstTap;
     } else {
         Serial.println("Access Denied: Unauthorized UID");
-        digitalWrite(buzzer, HIGH); 
+        digitalWrite(buzzer, HIGH); // Buzzer menyala untuk akses ditolak
         delay(1000);
         digitalWrite(buzzer, LOW);
     }
     return;
 }
 
+
 bool checkAuthorization(String uid) {
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Wi-Fi disconnected, cannot check authorization.");
         return false;
     }
 
     HTTPClient http;
     String query = API_URL + "/history/users?uid=eq." + uid + "&select=*";
     http.begin(client, query);
+
     int httpResponseCode = http.GET();
+
     if (httpResponseCode > 0) {
         String payload = http.getString();
-        if (payload.indexOf(uid) > -1) {  
+
+        if (payload.indexOf(uid) > -1) { 
             Serial.println("UID Found: Authorized.");
             http.end();
             return true;
@@ -267,19 +295,20 @@ bool checkAuthorization(String uid) {
         Serial.print("Error on GET request. HTTP Response code: ");
         Serial.println(httpResponseCode);
     }
+
     http.end();
-    return false;  
+    return false;  // Default: Unauthorized jika tidak ada UID cocok
 }
 
 void logSolenoidStatus(String uid, String time, String status) {
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Wi-Fi disconnected, cannot log status.");
+        Serial.println("Wi-Fi disconnected");
         return;
     }
 
     HTTPClient http;
-    String logEndpoint = API_URL + PostLog; 
-    http.begin(logEndpoint); 
+    String logEndpoint = API_URL + PostLog; // Endpoint untuk log status
+    http.begin(client, logEndpoint); // Tidak menggunakan API key
     http.addHeader("Content-Type", "application/json");
 
     // JSON payload
@@ -290,6 +319,7 @@ void logSolenoidStatus(String uid, String time, String status) {
     payload += "}";
 
     int httpResponseCode = http.POST(payload);
+
     if (httpResponseCode > 0) {
         String response = http.getString();
         Serial.println("POST Response:");
@@ -298,12 +328,12 @@ void logSolenoidStatus(String uid, String time, String status) {
         Serial.print("Error on POST request. HTTP Response code: ");
         Serial.println(httpResponseCode);
     }
+
     http.end();
 }
 
 void sendUidToDatabase(String uid) {
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Wi-Fi disconnected, cannot send UID to database.");
         return;
     }
 
@@ -313,13 +343,16 @@ void sendUidToDatabase(String uid) {
     }
 
     HTTPClient http;
-    String endpoint = "https://sijaga-railway-production.up.railway.app/card-id/create";
+    String endpoint = "https://sijaga-railway-production.up.railway.app/card-id/create"; // Endpoint dari gambar
     http.begin(endpoint);
     http.addHeader("Content-Type", "application/json");
 
+    // JSON payload
     String payload = "{\"cardId\":\"" + uid + "\"}";
-    Serial.println("Payload: " + payload); 
+    Serial.println("Payload: " + payload); // Debugging
+
     int httpResponseCode = http.POST(payload);
+
     if (httpResponseCode > 0) {
         String response = http.getString();
         Serial.println("POST Response:");
@@ -349,14 +382,13 @@ String getFormattedTime() {
 
 void StatusBarang(String status) {
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Wi-Fi disconnected, cannot send status to database.");
         return;
     }
 
     HTTPClient http;
-    String endpoint = API_URL + endpointStatusBarang;
+    String endpoint = API_URL + endpointStatusBarang; // Endpoint untuk POST data status barang
     http.begin(endpoint);
-    http.addHeader("Content-Type", "application/json"); 
+    http.addHeader("Content-Type", "application/json"); // Header untuk JSON payload
 
     // JSON payload
     String payload = "{";
@@ -380,19 +412,23 @@ void StatusBarang(String status) {
 
 void historypemakaian(String cardId, String status, String solenoidStatus) {
     String payload = "{";
-    payload += "\"card_id\":\"" + cardId + "\","; 
-    payload += "\"status\":\"" + solenoidStatus + "\",";  
-    payload += "\"availStatus\":\"" + status + "\""; 
+    payload += "\"card_id\":\"" + cardId + "\","; // ID kartu RFID
+    payload += "\"status\":\"" + solenoidStatus + "\",";  // Status penggunaan
+    payload += "\"availStatus\":\"" + status + "\""; // Status solenoid
     payload += "}";
+
+    // Menampilkan payload ke Serial Monitor (untuk debugging)
     Serial.println("Payload to send:");
     Serial.println(payload);
 
-    if (WiFi.status() == WL_CONNECTED) { 
+    // Membuat koneksi HTTP dan mengirimkan payload ke server
+    if (WiFi.status() == WL_CONNECTED) { // Periksa koneksi Wi-Fi
         HTTPClient http;
 
+        // URL tujuan 
         String url = API_URL + UsageHistory; 
-        http.begin(url); 
-        http.addHeader("Content-Type", "application/json");
+        http.begin(url); // Inisialisasi HTTPClient dengan URL
+        http.addHeader("Content-Type", "application/json"); // Tambahkan header untuk JSON
         int httpResponseCode = http.POST(payload);
         if (httpResponseCode > 0) {
             Serial.print("HTTP Response code: ");
@@ -404,12 +440,13 @@ void historypemakaian(String cardId, String status, String solenoidStatus) {
             Serial.print("Error on sending POST: ");
             Serial.println(httpResponseCode);
         }
-        http.end();
+
+        http.end(); 
     } else {
         Serial.println("WiFi Disconnected. Cannot send data.");
     }
 }
 
 void IRAM_ATTR handleGetar() {
-    getaranTerdeteksi = true; 
+    getaranTerdeteksi = true; // Set flag saat ada getaran
 }
